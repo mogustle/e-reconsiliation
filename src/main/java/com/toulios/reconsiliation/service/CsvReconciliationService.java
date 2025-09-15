@@ -4,12 +4,17 @@ import com.opencsv.bean.CsvToBean;
 import com.opencsv.bean.CsvToBeanBuilder;
 import com.toulios.reconsiliation.csv.TransactionRecord;
 import com.toulios.reconsiliation.config.ReconciliationProperties;
+import com.toulios.reconsiliation.config.RetryProperties;
 import com.toulios.reconsiliation.dto.ReconciliationResult;
 import com.toulios.reconsiliation.dto.UnmatchedReason;
 import com.toulios.reconsiliation.dto.UnmatchedTransaction;
 import com.toulios.reconsiliation.exception.CsvProcessingException;
 import com.toulios.reconsiliation.exception.InvalidFileException;
+import com.toulios.reconsiliation.exception.RetryExhaustedException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Recover;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -26,7 +31,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.concurrent.CompletableFuture;
 import java.util.ArrayList;
 import java.util.Locale;
@@ -61,9 +65,11 @@ import java.util.Locale;
 public class CsvReconciliationService {
 
 	private final ReconciliationProperties properties;
+	private final RetryProperties retryProperties;
 
-	public CsvReconciliationService(ReconciliationProperties properties) {
+	public CsvReconciliationService(ReconciliationProperties properties, RetryProperties retryProperties) {
 		this.properties = properties;
+		this.retryProperties = retryProperties;
 	}
 
 	/**
@@ -82,11 +88,22 @@ public class CsvReconciliationService {
 	 * 	</li>
 	 * </ul>
 	 *
+	 * <p>Includes retry logic with maximum 3 attempts and exponential backoff for resilient processing.</p>
+	 *
 	 * @param file multipart CSV file
 	 * @return future with map of grouping key to list of records
 	 * @throws IllegalArgumentException if parsing fails
 	 */
 	@Async("csvExecutor")
+	@Retryable(
+		retryFor = {CsvProcessingException.class, RuntimeException.class},
+		maxAttemptsExpression = "${reconciliation.retry.max-attempts:3}",
+		backoff = @Backoff(
+			delayExpression = "${reconciliation.retry.initial-interval:1000}",
+			multiplierExpression = "${reconciliation.retry.multiplier:2.0}",
+			maxDelayExpression = "${reconciliation.retry.max-interval:10000}"
+		)
+	)
 	public CompletableFuture<Map<String, List<TransactionRecord>>> groupCsvAsync(MultipartFile file) {
 		log.info("Starting CSV parsing for file: {} (size: {} bytes)", file.getOriginalFilename(), file.getSize());
 		
@@ -108,13 +125,11 @@ public class CsvReconciliationService {
 				// Build a map of grouping key -> list of records sharing that key
 				Map<String, List<TransactionRecord>> grouped = new HashMap<>();
 				var iterator = csvToBean.iterator();
-				int recordCount = 0;
 				while (iterator.hasNext()) {
 					TransactionRecord record = iterator.next();
 					// Compute a stable grouping key to limit pairwise comparisons during reconciliation
 					String key = computeGroupingKey(record);
 					grouped.computeIfAbsent(key, k -> new ArrayList<>()).add(record);
-					recordCount++;
 				}
 
 				return CompletableFuture.completedFuture(grouped);
@@ -141,11 +156,22 @@ public class CsvReconciliationService {
 	 * 		</ul>
 	 * </ol>
 	 *
+	 * <p>Includes retry logic with maximum 3 attempts and exponential backoff for resilient processing.</p>
+	 *
 	 * @param file1 first multipart CSV file
 	 * @param file2 second multipart CSV file
 	 * @return {@link ReconciliationResult} with matched/unmatched counts and details
 	 * @throws IllegalArgumentException if either file is missing or empty, or parsing fails
 	 */
+	@Retryable(
+		retryFor = {CsvProcessingException.class, RuntimeException.class},
+		maxAttemptsExpression = "${reconciliation.retry.max-attempts:3}",
+		backoff = @Backoff(
+			delayExpression = "${reconciliation.retry.initial-interval:1000}",
+			multiplierExpression = "${reconciliation.retry.multiplier:2.0}",
+			maxDelayExpression = "${reconciliation.retry.max-interval:10000}"
+		)
+	)
 	public ReconciliationResult reconsile(MultipartFile file1, MultipartFile file2) {
 		if (file1 == null || file1.isEmpty()) {
 			log.error("File1 is null or empty");
@@ -375,6 +401,59 @@ public class CsvReconciliationService {
 		if (idA != null && !idA.isBlank()) return idA;
 		if (idB != null && !idB.isBlank()) return idB;
 		return null;
+	}
+
+	/**
+	 * Recovery method for groupCsvAsync when all retry attempts are exhausted.
+	 * 
+	 * @param ex the exception that caused the retries to fail
+	 * @param file the file that failed to process
+	 * @throws RetryExhaustedException always thrown to indicate retry failure
+	 */
+	@Recover
+	public CompletableFuture<Map<String, List<TransactionRecord>>> recoverGroupCsvAsync(
+			Exception ex, MultipartFile file) {
+		String operation = "CSV parsing and grouping";
+		String fileName = file != null ? file.getOriginalFilename() : "unknown";
+		
+		log.error("All retry attempts exhausted for CSV grouping of file: {}. Error: {}", 
+				fileName, ex.getMessage(), ex);
+		
+		throw new RetryExhaustedException(
+			operation,
+			retryProperties.getMaxAttempts(),
+			ex.getMessage(),
+			String.format("Failed to process CSV file '%s' after %d retry attempts. Please check the file format and try again.", 
+				fileName, retryProperties.getMaxAttempts()),
+			ex
+		);
+	}
+
+	/**
+	 * Recovery method for reconsile when all retry attempts are exhausted.
+	 * 
+	 * @param ex the exception that caused the retries to fail
+	 * @param file1 the first file
+	 * @param file2 the second file
+	 * @throws RetryExhaustedException always thrown to indicate retry failure
+	 */
+	@Recover
+	public ReconciliationResult recoverReconsile(Exception ex, MultipartFile file1, MultipartFile file2) {
+		String operation = "file reconciliation";
+		String fileName1 = file1 != null ? file1.getOriginalFilename() : "unknown";
+		String fileName2 = file2 != null ? file2.getOriginalFilename() : "unknown";
+		
+		log.error("All retry attempts exhausted for reconciliation of files: {} and {}. Error: {}", 
+				fileName1, fileName2, ex.getMessage(), ex);
+		
+		throw new RetryExhaustedException(
+			operation,
+			retryProperties.getMaxAttempts(),
+			ex.getMessage(),
+			String.format("Failed to reconcile files '%s' and '%s' after %d retry attempts. Please check the files and try again.", 
+				fileName1, fileName2, retryProperties.getMaxAttempts()),
+			ex
+		);
 	}
 }
 

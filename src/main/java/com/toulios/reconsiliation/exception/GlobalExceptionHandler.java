@@ -1,5 +1,6 @@
 package com.toulios.reconsiliation.exception;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -11,8 +12,6 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 
 import java.net.URI;
 import java.time.Instant;
-
-import lombok.extern.slf4j.Slf4j;
 
 /**
  * Global exception handler for all REST controllers.
@@ -41,7 +40,38 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     /**
-     * Handle all custom reconciliation exceptions.
+     * Handle retry exhausted exceptions with detailed information.
+     */
+    @ExceptionHandler(RetryExhaustedException.class)
+    public ResponseEntity<ProblemDetail> handleRetryExhaustedException(
+            RetryExhaustedException ex, WebRequest request) {
+        
+        log.error("Retry exhausted exception occurred: {}", ex.getMessage(), ex);
+        
+        ErrorType errorType = ErrorType.fromCode(ex.getErrorCode());
+        
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(
+                HttpStatus.valueOf(ex.getHttpStatusCode()), 
+                ex.getMessage()
+        );
+        
+        problemDetail.setType(URI.create(getProblemBaseUrl() + errorType.getUrlFragment()));
+        problemDetail.setTitle(errorType.getTitle());
+        problemDetail.setProperty("errorCode", errorType.getCode());
+        problemDetail.setProperty("timestamp", Instant.now());
+        problemDetail.setProperty("description", errorType.getDescription());
+        
+        // Add specific properties for RetryExhaustedException
+        problemDetail.setProperty("operation", ex.getOperation());
+        problemDetail.setProperty("maxAttempts", ex.getMaxAttempts());
+        problemDetail.setProperty("originalError", ex.getOriginalErrorMessage());
+        problemDetail.setProperty("retryAdvice", "Please check your input files and try again. If the problem persists, contact support.");
+        
+        return ResponseEntity.status(ex.getHttpStatusCode()).body(problemDetail);
+    }
+
+    /**
+     * Handle all other custom reconciliation exceptions.
      */
     @ExceptionHandler(ReconciliationException.class)
     public ResponseEntity<ProblemDetail> handleReconciliationException(

@@ -34,6 +34,13 @@ public enum ErrorType {
         "The uploaded file exceeds the maximum allowed size"
     ),
     
+    RETRY_EXHAUSTED(
+        "RETRY_EXHAUSTED",
+        "Retry Attempts Exhausted",
+        "retry-exhausted",
+        "All retry attempts have been exhausted for the requested operation"
+    ),
+    
     INTERNAL_SERVER_ERROR(
         "INTERNAL_SERVER_ERROR",
         "Internal Server Error", 

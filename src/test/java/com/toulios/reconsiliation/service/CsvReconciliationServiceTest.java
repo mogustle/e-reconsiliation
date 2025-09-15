@@ -1,6 +1,7 @@
 package com.toulios.reconsiliation.service;
 
 import com.toulios.reconsiliation.config.ReconciliationProperties;
+import com.toulios.reconsiliation.config.RetryProperties;
 import com.toulios.reconsiliation.csv.TransactionRecord;
 import com.toulios.reconsiliation.dto.ReconciliationResult;
 import com.toulios.reconsiliation.dto.UnmatchedReason;
@@ -42,7 +43,8 @@ class CsvReconciliationServiceTest {
         properties.setCollapseWhitespace(true);
         properties.setStripPunctuation(false);
         
-        service = new CsvReconciliationService(properties);
+        RetryProperties retryProperties = new RetryProperties();
+        service = new CsvReconciliationService(properties, retryProperties);
     }
 
     // ========== groupCsvAsync Tests ==========
@@ -363,7 +365,8 @@ class CsvReconciliationServiceTest {
         // (fails areIdentical due to raw narrative difference, but passes details mismatch check)
         properties.setNormalizeCase(true);
         properties.setCollapseWhitespace(true);
-        service = new CsvReconciliationService(properties);
+        RetryProperties retryProperties = new RetryProperties();
+        service = new CsvReconciliationService(properties, retryProperties);
         
         MockMultipartFile file1 = createCsvFileWithRecord(
             "file1.csv", "John Doe", "2023-01-01 10:00:00", "100.50", "PAYMENT   FOR   SERVICES", "TXN001", "1", "WALLET123");
